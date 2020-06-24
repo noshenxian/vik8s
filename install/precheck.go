@@ -13,6 +13,14 @@ func PreCheck(node *ssh.Node) {
 	setAliRepo(node)
 	checkDistribution(node)
 	disableSELinuxAndSwap(node)
+	disableFireWalld(node)
+}
+
+func disableFireWalld(node *ssh.Node) {
+	_, _ = node.Cmd("systemctl stop firewalld")
+	_, _ = node.Cmd("systemctl disable firewalld")
+	_, _ = node.Cmd("systemctl stop iptables")
+	_, _ = node.Cmd("systemctl disable iptables")
 }
 
 //经检查系统类型是否满足
