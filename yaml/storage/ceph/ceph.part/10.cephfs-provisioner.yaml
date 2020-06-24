@@ -1,0 +1,137 @@
+{{ if .MDS.Enable }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cephfs-provisioner
+  namespace: ceph
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "delete"]
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cephfs-provisioner
+  namespace: ceph
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cephfs-provisioner
+subjects:
+  - kind: ServiceAccount
+    name: cephfs-provisioner
+
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cephfs-provisioner
+  namespace: ceph
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    resourceNames: ["kube-dns","coredns"]
+    verbs: ["list", "get"]
+
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cephfs-provisioner
+  namespace: ceph
+subjects:
+  - kind: ServiceAccount
+    name: cephfs-provisioner
+    namespace: ceph
+roleRef:
+  kind: ClusterRole
+  name: cephfs-provisioner
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cephfs-provisioner
+  namespace: ceph
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cephfs-provisioner
+  namespace: ceph
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cephfs-provisioner
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: cephfs-provisioner
+    spec:
+      serviceAccountName: cephfs-provisioner
+      tolerations:
+        - key: "node-role.kubernetes.io/master"
+          operator: "Equal"
+          value: ""
+          effect: "NoSchedule"
+      containers:
+        - name: cephfs-provisioner
+          image: "{{.ProvisionerRepo}}external_storage/cephfs-provisioner:latest"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PROVISIONER_NAME
+              value: ceph.com/cephfs
+            - name: PROVISIONER_SECRET_NAMESPACE
+              value: ceph
+          command:
+            - /usr/local/bin/cephfs-provisioner
+            - -master=https://{{.Kube.VIP}}:6443
+            - -kubeconfig=/kube/config
+          volumeMounts:
+            - name: kube-config
+              mountPath: /kube
+            - name: kube-data
+              mountPath: /var/run/kubernetes
+      volumes:
+        - name: kube-config
+          secret:
+            secretName: kube-config
+        - name: kube-data
+          hostPath:
+            path: /var/run/kubernetes
+---
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: cephfs
+  namespace: ceph
+provisioner: ceph.com/cephfs
+parameters:
+  monitors: {{ nodejoin .Monitor.Selected "monitors" }}
+  adminId: admin
+  adminSecretName: ceph-secret-admin
+  adminSecretNamespace: ceph
+  claimRoot: /pvc-volumes
+{{ end }}

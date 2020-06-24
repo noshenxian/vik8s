@@ -1,0 +1,121 @@
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: ceph-mgr
+  namespace: ceph
+  labels:
+    app: ceph
+    daemon: mgr
+spec:
+  selector:
+    matchLabels:
+      app: ceph
+      daemon: mgr
+  template:
+    metadata:
+      name: ceph-mgr
+      labels:
+        app: ceph
+        daemon: mgr
+    spec:
+      nodeSelector:
+        {{ range $key, $value := .Manager.NodeSelector }}
+        {{ $key }}: {{ $value }}{{ end }}
+      volumes:
+        - name: ceph-etc
+          secret:
+            secretName: ceph-conf-combined
+        - name: ceph-bootstrap-osd-keyring
+          secret:
+            secretName: ceph-bootstrap-osd-keyring
+        - name: ceph-bootstrap-mds-keyring
+          secret:
+            secretName: ceph-bootstrap-mds-keyring
+        - name: ceph-bootstrap-rgw-keyring
+          secret:
+            secretName: ceph-bootstrap-rgw-keyring
+        - name: ceph-bootstrap-rbd-keyring
+          secret:
+            secretName: ceph-bootstrap-rbd-keyring
+        - name: entrypoint
+          configMap:
+            name: ceph-entrypoint
+            defaultMode: 0777
+{{.Repo.PullSecrets | indent 6}}
+      containers:
+        - name: ceph-mgr
+          image: {{.Repo}}ceph/ceph:{{.Version}}
+          imagePullPolicy: IfNotPresent
+          command: ["sh","-c","/opt/mgr"]
+          securityContext:
+            privileged: true
+          ports:
+            - name: api
+              containerPort: 6800
+            - name: dashboard
+              containerPort: 7000
+          env:
+            - name: CEPH_CLUSTER
+              value: ceph
+            - name: CEHP_FSID
+              value: {{ .FSID }}
+            - name: CEHP_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CEHP_NODE_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NETWORK_AUTO_DETECT
+              value: "4"
+          volumeMounts:
+            - name: ceph-etc
+              mountPath: /etc/ceph
+            - name: ceph-bootstrap-osd-keyring
+              mountPath: /var/lib/ceph/bootstrap-osd
+            - name: ceph-bootstrap-mds-keyring
+              mountPath: /var/lib/ceph/bootstrap-mds
+            - name: ceph-bootstrap-rgw-keyring
+              mountPath: /var/lib/ceph/bootstrap-rgw
+            - name: ceph-bootstrap-rbd-keyring
+              mountPath: /var/lib/ceph/bootstrap-rbd
+            - name: entrypoint
+              mountPath: /opt
+          livenessProbe:
+            tcpSocket:
+              port: 6800
+            initialDelaySeconds: 60
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: 6800
+            timeoutSeconds: 5
+#         resources:
+#           requests:
+#             memory: {{ environ "ceph_mgr_requests_memory" "50Mi" }}
+#             cpu: {{ environ "ceph_mgr_requests_cpu" "100m" }}
+#           limits:
+#             memory: {{ environ "ceph_mgr_limits_memory" "100Mi" }}
+#             cpu: {{ environ "ceph_mgr_limits_cpu" "200m" }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ceph-mgr
+  namespace: ceph
+  labels:
+    app: ceph
+    daemon: mgr
+spec:
+  selector:
+    app: ceph
+    daemon: mgr
+  ports:
+    - name: api
+      port: 6800
+      targetPort: 6800
+    - name: dashboard
+      port: 7000
+      targetPort: 7000

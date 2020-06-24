@@ -1,0 +1,920 @@
+# name 01.secrets.yaml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ceph
+
+---
+apiVersion: v1
+kind: Secret
+type: kubernetes.io/rbd
+metadata:
+  name: ceph-secret-admin
+  namespace: ceph
+data:
+  key: {{ base64 .Secrets.ClientAdminKey }}
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ceph-conf-combined
+  namespace: ceph
+type: Opaque
+data:
+  ceph.conf: {{ base64 .Secrets.CephConf }}
+  ceph.client.admin.keyring: {{ base64 .Secrets.ClientAdminKeyring }}
+  ceph.mon.keyring: {{ base64 .Secrets.MonKeyring }}
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ceph-bootstrap-rgw-keyring
+  namespace: ceph
+type: Opaque
+data:
+  ceph.keyring: {{ base64 .Secrets.RGWBootstrapKeyring }}
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ceph-bootstrap-mds-keyring
+  namespace: ceph
+type: Opaque
+data:
+  ceph.keyring: {{ base64 .Secrets.MDSBootstrapKeyring }}
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ceph-bootstrap-osd-keyring
+  namespace: ceph
+type: Opaque
+data:
+  ceph.keyring: {{ base64 .Secrets.OSDBootstrapKeyring }}
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ceph-bootstrap-rbd-keyring
+  namespace: ceph
+type: Opaque
+data:
+  ceph.keyring: {{ base64 .Secrets.RBDBootstrapKeyring }}
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ceph-client-admin-keyring
+  namespace: ceph
+type: Opaque
+data:
+  ceph-client-key: {{ base64 .Secrets.ClientAdminKeyring }}
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kube-config
+  namespace: ceph
+type: Opaque
+data:
+  config: {{ base64 .Kube.AdminConf }}
+
+
+{{.Repo.Secret}}
+
+# name 02.entrypoints.yaml
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: ceph-entrypoint
+  namespace: ceph
+data:
+  mon: |
+    mkdir -p /var/lib/ceph/mon/ceph-${CEHP_NODE_ID}
+
+    if [ ! -e "/var/lib/ceph/mon/ceph-${CEHP_NODE_ID}/keyring" ]; then
+      if [ "${CEHP_NODE_ID}" == "{{ (index .Monitor.Selected 0).Hostname }}" ]; then
+        echo "mkdir monmap"
+        monmaptool --create --add ${CEHP_NODE_ID} ${CEHP_NODE_HOST} --fsid ${CEHP_FSID} /tmp/monmap
+      else
+        echo "get monmap"
+        ceph mon getmap -o /tmp/monmap
+      fi
+      echo "prepare mon data"
+      ceph-mon --mkfs --cluster ${CEPH_CLUSTER} -i ${CEHP_NODE_ID} --monmap /tmp/monmap --keyring /etc/ceph/ceph.mon.keyring
+    fi
+
+    if [ "${CEHP_NODE_ID}" == "{{ (index .Monitor.Selected 0).Hostname }}" ]; then
+      echo "start mon"
+      ceph-mon -f --cluster ${CEPH_CLUSTER} -i ${CEHP_NODE_ID}
+    else
+      echo "start mon ${CEHP_NODE_HOST}"
+      ceph-mon -f --cluster ${CEPH_CLUSTER} -i ${CEHP_NODE_ID} --public-addr ${CEHP_NODE_HOST}
+    fi
+
+  mgr: |
+    mkdir -p /var/lib/ceph/mgr/ceph-${CEHP_NODE_ID}
+    ceph auth get-or-create mgr.${CEHP_NODE_ID} mon 'allow profile mgr' osd 'allow *' mds 'allow *'
+    ceph auth get mgr.${CEHP_NODE_ID} -o /var/lib/ceph/mgr/ceph-${CEHP_NODE_ID}/keyring
+    ceph-mgr -f --cluster ${CEPH_CLUSTER} -i ${CEHP_NODE_ID} -d
+
+  osd: |
+    if [ ! -e "/var/lib/ceph/osd/id" ]; then
+      ceph -s
+      export UUID=$(uuidgen)
+      export OSD_SECRET=$(ceph-authtool --gen-print-key)
+
+      ID=$(echo "{\"cephx_secret\": \"$OSD_SECRET\"}" | \
+        ceph osd new $UUID -i - -n client.bootstrap-osd -k /var/lib/ceph/bootstrap-osd/ceph.keyring)
+      mkdir -p /var/lib/ceph/osd/ceph-$ID
+
+      echo $ID > /var/lib/ceph/osd/id
+
+      mkfs.xfs -f /dev/${CEPH_DEVICES}
+      mount /dev/${CEPH_DEVICES} /var/lib/ceph/osd/ceph-$ID
+
+      ceph-authtool --create-keyring /var/lib/ceph/osd/ceph-$ID/keyring --name osd.$ID --add-key $OSD_SECRET
+      ceph-osd -i $ID --mkfs --osd-uuid $UUID
+    else
+      export ID=`cat /var/lib/ceph/osd/id`
+      mount /dev/${CEPH_DEVICES} /var/lib/ceph/osd/ceph-$ID
+    fi
+    ceph-osd -i $ID -f
+
+  mds: |
+    if [ ! -e "/var/lib/ceph/mds/ceph-${CEHP_NODE_ID}/keyring" ]; then
+      mkdir -p /var/lib/ceph/mds/ceph-${CEHP_NODE_ID}
+      ceph-authtool --create-keyring /var/lib/ceph/mds/ceph-${CEHP_NODE_ID}/keyring --gen-key -n mds.${CEHP_NODE_ID}
+      ceph auth add mds.${CEHP_NODE_ID} \
+        osd "allow rwx" mds "allow" mon "allow profile mds" \
+        -i /var/lib/ceph/mds/ceph-${CEHP_NODE_ID}/keyring
+    fi
+    ceph-mds -f --cluster ${CEPH_CLUSTER} -i ${CEHP_NODE_ID}
+
+
+
+# name 04.ceph-mon.yaml
+---
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: ceph-mon
+  namespace: ceph
+  labels:
+    app: ceph
+    daemon: mon
+spec:
+  selector:
+    matchLabels:
+      app: ceph
+      daemon: mon
+  template:
+    metadata:
+      name: ceph-mon
+      labels:
+        app: ceph
+        daemon: mon
+    spec:
+      hostNetwork: true
+      nodeSelector:
+        {{ range $key, $value := .Monitor.NodeSelector }}
+        {{ $key }}: {{ $value }}{{ end }}
+      volumes:
+        - name: ceph-etc
+          secret:
+            secretName: ceph-conf-combined
+        - name: ceph-mon-data
+          hostPath:
+            path: /var/lib/ceph/mon
+        - name: entrypoint
+          configMap:
+            name: ceph-entrypoint
+            defaultMode: 0777
+{{.Repo.PullSecrets | indent 6}}
+      containers:
+        - name: ceph-mon
+          image: {{.Repo}}ceph/ceph:{{.Version}}
+          imagePullPolicy: IfNotPresent
+          command: ["sh","-c","/opt/mon"]
+          securityContext:
+            privileged: true
+          ports:
+            - name: v1
+              containerPort: 6789
+            - name: v2
+              containerPort: 3300
+          env:
+            - name: CEPH_CLUSTER
+              value: ceph
+            - name: CEHP_FSID
+              value: {{ .FSID }}
+            - name: CEHP_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CEHP_NODE_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NETWORK_AUTO_DETECT
+              value: "4"
+          volumeMounts:
+            - name: ceph-etc
+              mountPath: /etc/ceph
+            - name: ceph-mon-data
+              mountPath: /var/lib/ceph/mon
+            - name: entrypoint
+              mountPath: /opt
+          livenessProbe:
+            tcpSocket:
+              port: 6789
+            initialDelaySeconds: 60
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: 6789
+            timeoutSeconds: 5
+          resources:
+            requests:
+              memory: {{ environ "ceph_mon_requests_memory" "50Mi" }}
+              cpu: {{ environ "ceph_mon_requests_cpu" "1000m" }}
+            limits:
+              memory: {{ environ "ceph_mon_limits_memory" "100Mi" }}
+              cpu: {{ environ "ceph_mon_limits_cpu" "2000m" }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ceph-mon
+  namespace: ceph
+  labels:
+    app: ceph
+    daemon: mon
+spec:
+  selector:
+    app: ceph
+    daemon: mon
+  ports:
+    - name: v1
+      port: 6789
+      targetPort: 6789
+    - name: v2
+      port: 3300
+      targetPort: 3300
+
+
+# name 05.ceph-mgr.yaml
+---
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: ceph-mgr
+  namespace: ceph
+  labels:
+    app: ceph
+    daemon: mgr
+spec:
+  selector:
+    matchLabels:
+      app: ceph
+      daemon: mgr
+  template:
+    metadata:
+      name: ceph-mgr
+      labels:
+        app: ceph
+        daemon: mgr
+    spec:
+      nodeSelector:
+        {{ range $key, $value := .Manager.NodeSelector }}
+        {{ $key }}: {{ $value }}{{ end }}
+      volumes:
+        - name: ceph-etc
+          secret:
+            secretName: ceph-conf-combined
+        - name: ceph-bootstrap-osd-keyring
+          secret:
+            secretName: ceph-bootstrap-osd-keyring
+        - name: ceph-bootstrap-mds-keyring
+          secret:
+            secretName: ceph-bootstrap-mds-keyring
+        - name: ceph-bootstrap-rgw-keyring
+          secret:
+            secretName: ceph-bootstrap-rgw-keyring
+        - name: ceph-bootstrap-rbd-keyring
+          secret:
+            secretName: ceph-bootstrap-rbd-keyring
+        - name: entrypoint
+          configMap:
+            name: ceph-entrypoint
+            defaultMode: 0777
+{{.Repo.PullSecrets | indent 6}}
+      containers:
+        - name: ceph-mgr
+          image: {{.Repo}}ceph/ceph:{{.Version}}
+          imagePullPolicy: IfNotPresent
+          command: ["sh","-c","/opt/mgr"]
+          securityContext:
+            privileged: true
+          ports:
+            - name: api
+              containerPort: 6800
+            - name: dashboard
+              containerPort: 7000
+          env:
+            - name: CEPH_CLUSTER
+              value: ceph
+            - name: CEHP_FSID
+              value: {{ .FSID }}
+            - name: CEHP_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CEHP_NODE_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NETWORK_AUTO_DETECT
+              value: "4"
+          volumeMounts:
+            - name: ceph-etc
+              mountPath: /etc/ceph
+            - name: ceph-bootstrap-osd-keyring
+              mountPath: /var/lib/ceph/bootstrap-osd
+            - name: ceph-bootstrap-mds-keyring
+              mountPath: /var/lib/ceph/bootstrap-mds
+            - name: ceph-bootstrap-rgw-keyring
+              mountPath: /var/lib/ceph/bootstrap-rgw
+            - name: ceph-bootstrap-rbd-keyring
+              mountPath: /var/lib/ceph/bootstrap-rbd
+            - name: entrypoint
+              mountPath: /opt
+          livenessProbe:
+            tcpSocket:
+              port: 6800
+            initialDelaySeconds: 60
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: 6800
+            timeoutSeconds: 5
+#         resources:
+#           requests:
+#             memory: {{ environ "ceph_mgr_requests_memory" "50Mi" }}
+#             cpu: {{ environ "ceph_mgr_requests_cpu" "100m" }}
+#           limits:
+#             memory: {{ environ "ceph_mgr_limits_memory" "100Mi" }}
+#             cpu: {{ environ "ceph_mgr_limits_cpu" "200m" }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ceph-mgr
+  namespace: ceph
+  labels:
+    app: ceph
+    daemon: mgr
+spec:
+  selector:
+    app: ceph
+    daemon: mgr
+  ports:
+    - name: api
+      port: 6800
+      targetPort: 6800
+    - name: dashboard
+      port: 7000
+      targetPort: 7000
+
+
+# name 06.ceph-osd.yaml
+---
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: ceph-osd
+  namespace: ceph
+  labels:
+    app: ceph
+    daemon: osd
+spec:
+  selector:
+    matchLabels:
+      app: ceph
+      daemon: osd
+  template:
+    metadata:
+      name: ceph-osd
+      labels:
+        app: ceph
+        daemon: osd
+    spec:
+      nodeSelector:
+        {{ range $key, $value := .OSD.NodeSelector }}
+        {{ $key }}: {{ $value }}{{ end }}
+      volumes:
+        - name: devices
+          hostPath:
+            path: /dev
+        - name: ceph-etc
+          secret:
+            secretName: ceph-conf-combined
+        - name: ceph-bootstrap-osd-keyring
+          secret:
+            secretName: ceph-bootstrap-osd-keyring
+        - name: ceph-bootstrap-mds-keyring
+          secret:
+            secretName: ceph-bootstrap-mds-keyring
+        - name: ceph-bootstrap-rgw-keyring
+          secret:
+            secretName: ceph-bootstrap-rgw-keyring
+        - name: ceph-bootstrap-rbd-keyring
+          secret:
+            secretName: ceph-bootstrap-rbd-keyring
+        - name: ceph-osd-directory
+          hostPath:
+            path: /var/lib/ceph/osd
+        - name: entrypoint
+          configMap:
+            name: ceph-entrypoint
+            defaultMode: 0777
+{{.Repo.PullSecrets | indent 6}}
+      containers:
+        - name: ceph-osd
+          image: {{.Repo}}ceph/ceph:{{.Version}}
+          imagePullPolicy: IfNotPresent
+          command: ["sh","-c","/opt/osd"]
+          volumeMounts:
+            - name: devices
+              mountPath: /dev
+            - name: ceph-etc
+              mountPath: /etc/ceph
+            - name: ceph-bootstrap-osd-keyring
+              mountPath: /var/lib/ceph/bootstrap-osd
+            - name: ceph-bootstrap-mds-keyring
+              mountPath: /var/lib/ceph/bootstrap-mds
+            - name: ceph-bootstrap-rgw-keyring
+              mountPath: /var/lib/ceph/bootstrap-rgw
+            - name: ceph-bootstrap-rbd-keyring
+              mountPath: /var/lib/ceph/bootstrap-rbd
+            - name: ceph-osd-directory
+              mountPath: /var/lib/ceph/osd
+            - name: entrypoint
+              mountPath: /opt
+          securityContext:
+            privileged: true
+          env:
+            - name: CEPH_CLUSTER
+              value: ceph
+            - name: CEHP_FSID
+              value: {{ .FSID }}
+            - name: CEHP_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CEHP_NODE_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NETWORK_AUTO_DETECT
+              value: "4"
+            - name: CEPH_DEVICES
+              value: {{ .OSD.Devices }}
+          livenessProbe:
+            tcpSocket:
+              port: 6800
+            initialDelaySeconds: 60
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: 6800
+            timeoutSeconds: 5
+          resources:
+            requests:
+              memory: {{ environ "ceph_osd_requests_memory" "512Mi" }}
+              cpu: {{ environ "ceph_osd_requests_cpu" "1000m" }}
+            limits:
+              memory: {{ environ "ceph_osd_limits_memory" "1024Mi" }}
+              cpu: {{ environ "ceph_osd_limits_cpu" "2000m" }}
+
+# name 07.ceph-mds.yaml
+---
+{{ if .MDS.Enable }}
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: ceph-mds
+  namespace: ceph
+  labels:
+    app: ceph
+    daemon: mds
+spec:
+  selector:
+    matchLabels:
+      app: ceph
+      daemon: mds
+  template:
+    metadata:
+      name: ceph-mds
+      labels:
+        app: ceph
+        daemon: mds
+    spec:
+      nodeSelector:
+        {{ range $key, $value := .MDS.NodeSelector }}
+        {{ $key }}: {{ $value }}{{ end }}
+      volumes:
+        - name: ceph-etc
+          secret:
+            secretName: ceph-conf-combined
+        - name: ceph-data
+          hostPath:
+            path: /var/lib/ceph/mds
+        - name: ceph-bootstrap-osd-keyring
+          secret:
+            secretName: ceph-bootstrap-osd-keyring
+        - name: ceph-bootstrap-mds-keyring
+          secret:
+            secretName: ceph-bootstrap-mds-keyring
+        - name: ceph-bootstrap-rgw-keyring
+          secret:
+            secretName: ceph-bootstrap-rgw-keyring
+        - name: ceph-bootstrap-rbd-keyring
+          secret:
+            secretName: ceph-bootstrap-rbd-keyring
+        - name: entrypoint
+          configMap:
+            name: ceph-entrypoint
+            defaultMode: 0777
+{{.Repo.PullSecrets | indent 6}}
+      containers:
+        - name: ceph-mds
+          image: {{.Repo}}ceph/ceph:{{.Version}}
+          imagePullPolicy: IfNotPresent
+          command: ["sh","-c","/opt/mds"]
+          ports:
+            - containerPort: 6800
+          env:
+            - name: CEPH_CLUSTER
+              value: ceph
+            - name: CEHP_FSID
+              value: {{ .FSID }}
+            - name: CEHP_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CEHP_NODE_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NETWORK_AUTO_DETECT
+              value: "4"
+          volumeMounts:
+            - name: ceph-etc
+              mountPath: /etc/ceph
+            - name: ceph-data
+              mountPath: /var/lib/ceph/mds
+            - name: ceph-bootstrap-osd-keyring
+              mountPath: /var/lib/ceph/bootstrap-osd
+            - name: ceph-bootstrap-mds-keyring
+              mountPath: /var/lib/ceph/bootstrap-mds
+            - name: ceph-bootstrap-rgw-keyring
+              mountPath: /var/lib/ceph/bootstrap-rgw
+            - name: ceph-bootstrap-rbd-keyring
+              mountPath: /var/lib/ceph/bootstrap-rbd
+            - name: entrypoint
+              mountPath: /opt
+          livenessProbe:
+            tcpSocket:
+              port: 6800
+            initialDelaySeconds: 60
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: 6800
+            timeoutSeconds: 5
+          resources:
+            requests:
+              memory: {{ environ "ceph_mds_requests_memory" "100Mi" }}
+              cpu: {{ environ "ceph_mds_requests_cpu" "250m" }}
+            limits:
+              memory: {{ environ "ceph_mds_limits_memory" "500Mi" }}
+              cpu: {{ environ "ceph_mds_limits_cpu" "500m" }}
+{{ end }}
+
+# name 09.ceph-rbd-provisioner.yaml
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rbd-provisioner
+  namespace: ceph
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: rbd-provisioner
+  namespace: ceph
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    resourceNames: ["kube-dns","coredns"]
+    verbs: ["list", "get"]
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: rbd-provisioner
+  namespace: ceph
+subjects:
+  - kind: ServiceAccount
+    name: rbd-provisioner
+    namespace: ceph
+roleRef:
+  kind: ClusterRole
+  name: rbd-provisioner
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rbd-provisioner
+  namespace: ceph
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: rbd-provisioner
+subjects:
+  - kind: ServiceAccount
+    name: rbd-provisioner
+    namespace: ceph
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rbd-provisioner
+  namespace: ceph
+
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rbd-provisioner
+  namespace: ceph
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rbd-provisioner
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: rbd-provisioner
+    spec:
+      serviceAccountName: rbd-provisioner
+      tolerations:
+        - key: "node-role.kubernetes.io/master"
+          operator: "Equal"
+          value: ""
+          effect: "NoSchedule"
+      containers:
+        - name: rbd-provisioner
+          image: "{{.ProvisionerRepo}}external_storage/rbd-provisioner:latest"
+          imagePullPolicy: IfNotPresent
+          args:
+            - -master=https://{{.Kube.VIP}}:6443
+            - -kubeconfig=/kube/config
+          env:
+            - name: PROVISIONER_NAME
+              value: ceph.com/rbd
+          volumeMounts:
+            - name: kube-config
+              mountPath: /kube
+            - name: kube-data
+              mountPath: /var/run/kubernetes
+      volumes:
+        - name: kube-config
+          secret:
+            secretName: kube-config
+        - name: kube-data
+          hostPath:
+            path: /var/run/kubernetes
+
+---
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: ceph-rbd
+  namespace: ceph
+provisioner: ceph.com/rbd
+parameters:
+  monitors: {{ nodejoin .Monitor.Selected "monitors" }}
+  pool: kube
+  adminId: admin
+  adminSecretNamespace: ceph
+  adminSecretName: ceph-secret-admin
+  userId: admin
+  userSecretNamespace: ceph
+  userSecretName: ceph-secret-admin
+  fsType: ext4
+  imageFormat: "2"
+  imageFeatures: "layering"
+
+# name 10.cephfs-provisioner.yaml
+---
+{{ if .MDS.Enable }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cephfs-provisioner
+  namespace: ceph
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "delete"]
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cephfs-provisioner
+  namespace: ceph
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cephfs-provisioner
+subjects:
+  - kind: ServiceAccount
+    name: cephfs-provisioner
+
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cephfs-provisioner
+  namespace: ceph
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    resourceNames: ["kube-dns","coredns"]
+    verbs: ["list", "get"]
+
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cephfs-provisioner
+  namespace: ceph
+subjects:
+  - kind: ServiceAccount
+    name: cephfs-provisioner
+    namespace: ceph
+roleRef:
+  kind: ClusterRole
+  name: cephfs-provisioner
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cephfs-provisioner
+  namespace: ceph
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cephfs-provisioner
+  namespace: ceph
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cephfs-provisioner
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: cephfs-provisioner
+    spec:
+      serviceAccountName: cephfs-provisioner
+      tolerations:
+        - key: "node-role.kubernetes.io/master"
+          operator: "Equal"
+          value: ""
+          effect: "NoSchedule"
+      containers:
+        - name: cephfs-provisioner
+          image: "{{.ProvisionerRepo}}external_storage/cephfs-provisioner:latest"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PROVISIONER_NAME
+              value: ceph.com/cephfs
+            - name: PROVISIONER_SECRET_NAMESPACE
+              value: ceph
+          command:
+            - /usr/local/bin/cephfs-provisioner
+            - -master=https://{{.Kube.VIP}}:6443
+            - -kubeconfig=/kube/config
+          volumeMounts:
+            - name: kube-config
+              mountPath: /kube
+            - name: kube-data
+              mountPath: /var/run/kubernetes
+      volumes:
+        - name: kube-config
+          secret:
+            secretName: kube-config
+        - name: kube-data
+          hostPath:
+            path: /var/run/kubernetes
+---
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: cephfs
+  namespace: ceph
+provisioner: ceph.com/cephfs
+parameters:
+  monitors: {{ nodejoin .Monitor.Selected "monitors" }}
+  adminId: admin
+  adminSecretName: ceph-secret-admin
+  adminSecretNamespace: ceph
+  claimRoot: /pvc-volumes
+{{ end }}
+
+# name 99.ingress.yaml
+---
+{{ if .Dashboard.Enable }}
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress
+metadata:
+  name: ceph-dashboard
+  namespace: ceph
+spec:
+  rules:
+    - host: {{ .Dashboard.Ingress }}
+      http:
+        paths:
+          - backend:
+              serviceName: ceph-mgr
+              servicePort: 7000
+{{ end }}
+

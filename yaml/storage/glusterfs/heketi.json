@@ -1,0 +1,21 @@
+{
+	"port": "8080",
+	"use_auth": true,
+	"jwt": {
+		"admin": {
+			"key": "{{ .Heketi.UserKey }}"
+		},
+		"user": {
+			"key": "{{ .Heketi.UserKey }}"
+		}
+	},
+	"glusterfs": {
+		"executor": "kubernetes",
+		"db": "/var/lib/heketi/heketi.db",
+		"kubeexec": {
+			"rebalance_on_expansion": true
+		},
+		"loglevel": "warning"
+	},
+	"backup_db_to_kube_secret": true
+}

@@ -1,0 +1,73 @@
+{{ if .Heketi.Enable }}
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: deploy-heketi
+  labels:
+    glusterfs: heketi-deployment
+    deploy-heketi: deployment
+  annotations:
+    description: Defines how to deploy Heketi
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      glusterfs: heketi-pod
+      deploy-heketi: pod
+  template:
+    metadata:
+      name: deploy-heketi
+      labels:
+        glusterfs: heketi-pod
+        deploy-heketi: pod
+    spec:
+      serviceAccountName: heketi-service-account
+      containers:
+        - image: {{.Repo}}heketi/heketi:dev
+          imagePullPolicy: IfNotPresent
+          name: deploy-heketi
+          env:
+            - name: HEKETI_USER_KEY
+              value: {{ .Heketi.UserKey }}
+            - name: HEKETI_ADMIN_KEY
+              value: {{ .Heketi.AdminKey }}
+            - name: HEKETI_EXECUTOR
+              value: "kubernetes"
+            - name: HEKETI_FSTAB
+              value: "/var/lib/heketi/fstab"
+            - name: HEKETI_SNAPSHOT_LIMIT
+              value: '14'
+            - name: HEKETI_KUBE_GLUSTER_DAEMONSET
+              value: "y"
+            - name: HEKETI_IGNORE_STALE_OPERATIONS
+              value: "true"
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: db
+              mountPath: "/var/lib/heketi"
+            - name: config
+              mountPath: /etc/heketi
+            - name: topology-json
+              mountPath: /data
+          readinessProbe:
+            timeoutSeconds: 3
+            initialDelaySeconds: 3
+            httpGet:
+              path: "/hello"
+              port: 8080
+          livenessProbe:
+            timeoutSeconds: 3
+            initialDelaySeconds: 30
+            httpGet:
+              path: "/hello"
+              port: 8080
+      volumes:
+        - name: db
+        - name: config
+          secret:
+            secretName: heketi-config-secret
+        - name: topology-json
+          configMap:
+            name: heketi-config-topology-json
+{{ end }}

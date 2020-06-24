@@ -1,0 +1,107 @@
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: ceph-osd
+  namespace: ceph
+  labels:
+    app: ceph
+    daemon: osd
+spec:
+  selector:
+    matchLabels:
+      app: ceph
+      daemon: osd
+  template:
+    metadata:
+      name: ceph-osd
+      labels:
+        app: ceph
+        daemon: osd
+    spec:
+      nodeSelector:
+        {{ range $key, $value := .OSD.NodeSelector }}
+        {{ $key }}: {{ $value }}{{ end }}
+      volumes:
+        - name: devices
+          hostPath:
+            path: /dev
+        - name: ceph-etc
+          secret:
+            secretName: ceph-conf-combined
+        - name: ceph-bootstrap-osd-keyring
+          secret:
+            secretName: ceph-bootstrap-osd-keyring
+        - name: ceph-bootstrap-mds-keyring
+          secret:
+            secretName: ceph-bootstrap-mds-keyring
+        - name: ceph-bootstrap-rgw-keyring
+          secret:
+            secretName: ceph-bootstrap-rgw-keyring
+        - name: ceph-bootstrap-rbd-keyring
+          secret:
+            secretName: ceph-bootstrap-rbd-keyring
+        - name: ceph-osd-directory
+          hostPath:
+            path: /var/lib/ceph/osd
+        - name: entrypoint
+          configMap:
+            name: ceph-entrypoint
+            defaultMode: 0777
+{{.Repo.PullSecrets | indent 6}}
+      containers:
+        - name: ceph-osd
+          image: {{.Repo}}ceph/ceph:{{.Version}}
+          imagePullPolicy: IfNotPresent
+          command: ["sh","-c","/opt/osd"]
+          volumeMounts:
+            - name: devices
+              mountPath: /dev
+            - name: ceph-etc
+              mountPath: /etc/ceph
+            - name: ceph-bootstrap-osd-keyring
+              mountPath: /var/lib/ceph/bootstrap-osd
+            - name: ceph-bootstrap-mds-keyring
+              mountPath: /var/lib/ceph/bootstrap-mds
+            - name: ceph-bootstrap-rgw-keyring
+              mountPath: /var/lib/ceph/bootstrap-rgw
+            - name: ceph-bootstrap-rbd-keyring
+              mountPath: /var/lib/ceph/bootstrap-rbd
+            - name: ceph-osd-directory
+              mountPath: /var/lib/ceph/osd
+            - name: entrypoint
+              mountPath: /opt
+          securityContext:
+            privileged: true
+          env:
+            - name: CEPH_CLUSTER
+              value: ceph
+            - name: CEHP_FSID
+              value: {{ .FSID }}
+            - name: CEHP_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CEHP_NODE_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NETWORK_AUTO_DETECT
+              value: "4"
+            - name: CEPH_DEVICES
+              value: {{ .OSD.Devices }}
+          livenessProbe:
+            tcpSocket:
+              port: 6800
+            initialDelaySeconds: 60
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: 6800
+            timeoutSeconds: 5
+          resources:
+            requests:
+              memory: {{ environ "ceph_osd_requests_memory" "512Mi" }}
+              cpu: {{ environ "ceph_osd_requests_cpu" "1000m" }}
+            limits:
+              memory: {{ environ "ceph_osd_limits_memory" "1024Mi" }}
+              cpu: {{ environ "ceph_osd_limits_cpu" "2000m" }}

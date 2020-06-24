@@ -1,0 +1,15 @@
+{{ if .Dashboard.Enable }}
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress
+metadata:
+  name: ceph-dashboard
+  namespace: ceph
+spec:
+  rules:
+    - host: {{ .Dashboard.Ingress }}
+      http:
+        paths:
+          - backend:
+              serviceName: ceph-mgr
+              servicePort: 7000
+{{ end }}

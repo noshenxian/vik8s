@@ -1,0 +1,68 @@
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: ceph-entrypoint
+  namespace: ceph
+data:
+  mon: |
+    mkdir -p /var/lib/ceph/mon/ceph-${CEHP_NODE_ID}
+
+    if [ ! -e "/var/lib/ceph/mon/ceph-${CEHP_NODE_ID}/keyring" ]; then
+      if [ "${CEHP_NODE_ID}" == "{{ (index .Monitor.Selected 0).Hostname }}" ]; then
+        echo "mkdir monmap"
+        monmaptool --create --add ${CEHP_NODE_ID} ${CEHP_NODE_HOST} --fsid ${CEHP_FSID} /tmp/monmap
+      else
+        echo "get monmap"
+        ceph mon getmap -o /tmp/monmap
+      fi
+      echo "prepare mon data"
+      ceph-mon --mkfs --cluster ${CEPH_CLUSTER} -i ${CEHP_NODE_ID} --monmap /tmp/monmap --keyring /etc/ceph/ceph.mon.keyring
+    fi
+
+    if [ "${CEHP_NODE_ID}" == "{{ (index .Monitor.Selected 0).Hostname }}" ]; then
+      echo "start mon"
+      ceph-mon -f --cluster ${CEPH_CLUSTER} -i ${CEHP_NODE_ID}
+    else
+      echo "start mon ${CEHP_NODE_HOST}"
+      ceph-mon -f --cluster ${CEPH_CLUSTER} -i ${CEHP_NODE_ID} --public-addr ${CEHP_NODE_HOST}
+    fi
+
+  mgr: |
+    mkdir -p /var/lib/ceph/mgr/ceph-${CEHP_NODE_ID}
+    ceph auth get-or-create mgr.${CEHP_NODE_ID} mon 'allow profile mgr' osd 'allow *' mds 'allow *'
+    ceph auth get mgr.${CEHP_NODE_ID} -o /var/lib/ceph/mgr/ceph-${CEHP_NODE_ID}/keyring
+    ceph-mgr -f --cluster ${CEPH_CLUSTER} -i ${CEHP_NODE_ID} -d
+
+  osd: |
+    if [ ! -e "/var/lib/ceph/osd/id" ]; then
+      ceph -s
+      export UUID=$(uuidgen)
+      export OSD_SECRET=$(ceph-authtool --gen-print-key)
+
+      ID=$(echo "{\"cephx_secret\": \"$OSD_SECRET\"}" | \
+        ceph osd new $UUID -i - -n client.bootstrap-osd -k /var/lib/ceph/bootstrap-osd/ceph.keyring)
+      mkdir -p /var/lib/ceph/osd/ceph-$ID
+
+      echo $ID > /var/lib/ceph/osd/id
+
+      mkfs.xfs -f /dev/${CEPH_DEVICES}
+      mount /dev/${CEPH_DEVICES} /var/lib/ceph/osd/ceph-$ID
+
+      ceph-authtool --create-keyring /var/lib/ceph/osd/ceph-$ID/keyring --name osd.$ID --add-key $OSD_SECRET
+      ceph-osd -i $ID --mkfs --osd-uuid $UUID
+    else
+      export ID=`cat /var/lib/ceph/osd/id`
+      mount /dev/${CEPH_DEVICES} /var/lib/ceph/osd/ceph-$ID
+    fi
+    ceph-osd -i $ID -f
+
+  mds: |
+    if [ ! -e "/var/lib/ceph/mds/ceph-${CEHP_NODE_ID}/keyring" ]; then
+      mkdir -p /var/lib/ceph/mds/ceph-${CEHP_NODE_ID}
+      ceph-authtool --create-keyring /var/lib/ceph/mds/ceph-${CEHP_NODE_ID}/keyring --gen-key -n mds.${CEHP_NODE_ID}
+      ceph auth add mds.${CEHP_NODE_ID} \
+        osd "allow rwx" mds "allow" mon "allow profile mds" \
+        -i /var/lib/ceph/mds/ceph-${CEHP_NODE_ID}/keyring
+    fi
+    ceph-mds -f --cluster ${CEPH_CLUSTER} -i ${CEHP_NODE_ID}
+

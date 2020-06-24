@@ -1,0 +1,21 @@
+{{ if .Heketi.Enable }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: heketi-config-secret
+  namespace: glusterfs
+type: Opaque
+data:
+  heketi.json: {{ .Heketi.ConfigJSON }}
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: heketi-config-topology-json
+  namespace: glusterfs
+data:
+  topology.json: |
+    {{ .Heketi.TopologyJson }}
+
+{{ end }}

@@ -1,0 +1,438 @@
+# name 01.namespace.yaml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: glusterfs
+
+
+# name 02.daemonset.yaml
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: glusterfs
+  namespace: glusterfs
+  labels:
+    glusterfs: daemonset
+  annotations:
+    description: GlusterFS DaemonSet
+    tags: glusterfs
+spec:
+  selector:
+    matchLabels:
+      glusterfs: pod
+      glusterfs-node: pod
+  template:
+    metadata:
+      name: glusterfs
+      labels:
+        glusterfs: pod
+        glusterfs-node: pod
+    spec:
+      nodeSelector:
+        {{ range $key, $value := .NodeSelector }}
+        {{ $key }}: {{ $value }}{{ end }}
+      hostNetwork: true
+      containers:
+        - image: {{.Repo}}gluster/gluster-centos:latest
+          imagePullPolicy: IfNotPresent
+          name: glusterfs
+          env:
+            # alternative for /dev volumeMount to enable access to *all* devices
+            - name: HOST_DEV_DIR
+              value: "/mnt/host-dev"
+            # set GLUSTER_BLOCKD_STATUS_PROBE_ENABLE to "1" so the
+            # readiness/liveness probe validate gluster-blockd as well
+            - name: GLUSTER_BLOCKD_STATUS_PROBE_ENABLE
+              value: "1"
+            - name: GB_GLFS_LRU_COUNT
+              value: "15"
+            - name: TCMU_LOGDIR
+              value: "/var/log/glusterfs/gluster-block"
+          resources:
+            requests:
+              memory: 100Mi
+              cpu: 100m
+          volumeMounts:
+            - name: glusterfs-heketi
+              mountPath: "/var/lib/heketi"
+            - name: glusterfs-run
+              mountPath: "/run"
+            - name: glusterfs-lvm
+              mountPath: "/run/lvm"
+            - name: glusterfs-etc
+              mountPath: "/etc/glusterfs"
+            - name: glusterfs-logs
+              mountPath: "/var/log/glusterfs"
+            - name: glusterfs-config
+              mountPath: "/var/lib/glusterd"
+            - name: glusterfs-host-dev
+              mountPath: "/mnt/host-dev"
+            - name: glusterfs-misc
+              mountPath: "/var/lib/misc/glusterfsd"
+            - name: glusterfs-block-sys-class
+              mountPath: "/sys/class"
+            - name: glusterfs-block-sys-module
+              mountPath: "/sys/module"
+            - name: glusterfs-cgroup
+              mountPath: "/sys/fs/cgroup"
+              readOnly: true
+            - name: glusterfs-ssl
+              mountPath: "/etc/ssl"
+              readOnly: true
+            - name: kernel-modules
+              mountPath: "/lib/modules"
+              readOnly: true
+            - name: vik8s-glusterfs-volumes
+              mountPath: "/data"
+          securityContext:
+            capabilities: {}
+            privileged: true
+          readinessProbe:
+            timeoutSeconds: 3
+            initialDelaySeconds: 40
+            exec:
+              command:
+                - "/bin/bash"
+                - "-c"
+                - "if command -v /usr/local/bin/status-probe.sh; then /usr/local/bin/status-probe.sh readiness; else systemctl status glusterd.service; fi"
+            periodSeconds: 25
+            successThreshold: 1
+            failureThreshold: 50
+          livenessProbe:
+            timeoutSeconds: 3
+            initialDelaySeconds: 40
+            exec:
+              command:
+                - "/bin/bash"
+                - "-c"
+                - "if command -v /usr/local/bin/status-probe.sh; then /usr/local/bin/status-probe.sh liveness; else systemctl status glusterd.service; fi"
+            periodSeconds: 25
+            successThreshold: 1
+            failureThreshold: 50
+      volumes:
+        - name: glusterfs-heketi
+          hostPath:
+            path: "/var/lib/heketi"
+        - name: glusterfs-run
+        - name: glusterfs-lvm
+          hostPath:
+            path: "/run/lvm"
+        - name: glusterfs-etc
+          hostPath:
+            path: "/etc/glusterfs"
+        - name: glusterfs-logs
+          hostPath:
+            path: "/var/log/glusterfs"
+        - name: glusterfs-config
+          hostPath:
+            path: "/var/lib/glusterd"
+        - name: glusterfs-host-dev
+          hostPath:
+            path: "/dev"
+        - name: glusterfs-misc
+          hostPath:
+            path: "/var/lib/misc/glusterfsd"
+        - name: glusterfs-block-sys-class
+          hostPath:
+            path: "/sys/class"
+        - name: glusterfs-block-sys-module
+          hostPath:
+            path: "/sys/module"
+        - name: glusterfs-cgroup
+          hostPath:
+            path: "/sys/fs/cgroup"
+        - name: glusterfs-ssl
+          hostPath:
+            path: "/etc/ssl"
+        - name: kernel-modules
+          hostPath:
+            path: "/lib/modules"
+        - name: vik8s-glusterfs-volumes
+          {{ if not ( eq .VolumesDir "" )}}
+          hostPath:
+            path: "{{ .VolumesDir }}"
+          {{ end }}
+
+
+# name 03.endpoints.yaml
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: glusterfs-endpoints
+  namespace: glusterfs
+subsets:
+  - addresses:
+      {{ range .Deploys }}
+      - ip: {{ .Node.Host }}
+      {{ end }}
+    ports:
+      - port: 24007
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: glusterfs-endpoints
+  namespace: glusterfs
+spec:
+  clusterIP: {{.VIP}}
+  ports:
+    - port: 24007
+
+# name 04.heketi-server-account.yaml
+---
+{{ if .Heketi.Enable }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: heketi-service-account
+  namespace: glusterfs
+  labels:
+    glusterfs: heketi-sa
+    heketi: sa
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: heketi-gluster-admin
+  namespace: glusterfs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: edit
+subjects:
+  - kind: ServiceAccount
+    name: heketi-service-account
+    namespace: glusterfs
+{{ end }}
+
+# name 05.heketi-config.yaml
+---
+{{ if .Heketi.Enable }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: heketi-config-secret
+  namespace: glusterfs
+type: Opaque
+data:
+  heketi.json: {{ .Heketi.ConfigJSON }}
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: heketi-config-topology-json
+  namespace: glusterfs
+data:
+  topology.json: |
+    {{ .Heketi.TopologyJson }}
+
+{{ end }}
+
+# name 06.deploy-heketi-deployment.yaml
+---
+{{ if .Heketi.Enable }}
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: deploy-heketi
+  labels:
+    glusterfs: heketi-deployment
+    deploy-heketi: deployment
+  annotations:
+    description: Defines how to deploy Heketi
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      glusterfs: heketi-pod
+      deploy-heketi: pod
+  template:
+    metadata:
+      name: deploy-heketi
+      labels:
+        glusterfs: heketi-pod
+        deploy-heketi: pod
+    spec:
+      serviceAccountName: heketi-service-account
+      containers:
+        - image: {{.Repo}}heketi/heketi:dev
+          imagePullPolicy: IfNotPresent
+          name: deploy-heketi
+          env:
+            - name: HEKETI_USER_KEY
+              value: {{ .Heketi.UserKey }}
+            - name: HEKETI_ADMIN_KEY
+              value: {{ .Heketi.AdminKey }}
+            - name: HEKETI_EXECUTOR
+              value: "kubernetes"
+            - name: HEKETI_FSTAB
+              value: "/var/lib/heketi/fstab"
+            - name: HEKETI_SNAPSHOT_LIMIT
+              value: '14'
+            - name: HEKETI_KUBE_GLUSTER_DAEMONSET
+              value: "y"
+            - name: HEKETI_IGNORE_STALE_OPERATIONS
+              value: "true"
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: db
+              mountPath: "/var/lib/heketi"
+            - name: config
+              mountPath: /etc/heketi
+            - name: topology-json
+              mountPath: /data
+          readinessProbe:
+            timeoutSeconds: 3
+            initialDelaySeconds: 3
+            httpGet:
+              path: "/hello"
+              port: 8080
+          livenessProbe:
+            timeoutSeconds: 3
+            initialDelaySeconds: 30
+            httpGet:
+              path: "/hello"
+              port: 8080
+      volumes:
+        - name: db
+        - name: config
+          secret:
+            secretName: heketi-config-secret
+        - name: topology-json
+          configMap:
+            name: heketi-config-topology-json
+{{ end }}
+
+# name 06.heketi-service.yaml
+---
+{{ if .Heketi.Enable }}
+
+kind: Service
+apiVersion: v1
+metadata:
+  name: heketi
+  namespace: glusterfs
+  labels:
+    glusterfs: heketi-service
+    heketi: service
+  annotations:
+    description: Exposes Heketi Service
+spec:
+  clusterIP: {{.Heketi.VIP}}
+  selector:
+    glusterfs: heketi-pod
+  ports:
+    - name: heketi
+      port: 8080
+      targetPort: 8080
+
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: heketi
+  namespace: glusterfs
+  labels:
+    glusterfs: heketi-deployment
+    heketi: deployment
+  annotations:
+    description: Defines how to deploy Heketi
+spec:
+  replicas: {{.Heketi.Replicas}}
+  selector:
+    matchLabels:
+      glusterfs: heketi-pod
+      heketi: pod
+  template:
+    metadata:
+      name: heketi
+      labels:
+        glusterfs: heketi-pod
+        heketi: pod
+    spec:
+      serviceAccountName: heketi-service-account
+      {{ if gt (len .Heketi.NodeSelector) 0 }}
+      nodeSelector:
+        {{ range $key, $value := .Heketi.NodeSelector }}
+        {{ $key }}: {{ $value }}{{ end }}
+      {{ end }}
+      containers:
+        - image: {{.Repo}}heketi/heketi:dev
+          imagePullPolicy: IfNotPresent
+          name: heketi
+          env:
+            - name: HEKETI_USER_KEY
+              value: {{ .Heketi.UserKey }}
+            - name: HEKETI_ADMIN_KEY
+              value: {{ .Heketi.AdminKey }}
+            - name: HEKETI_EXECUTOR
+              value: "kubernetes"
+            - name: HEKETI_FSTAB
+              value: "/var/lib/heketi/fstab"
+            - name: HEKETI_SNAPSHOT_LIMIT
+              value: '14'
+            - name: HEKETI_KUBE_GLUSTER_DAEMONSET
+              value: "y"
+            - name: HEKETI_IGNORE_STALE_OPERATIONS
+              value: "true"
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: db
+              mountPath: "/var/lib/heketi"
+            - name: config
+              mountPath: /etc/heketi
+            - name: topology-json
+              mountPath: /data
+          readinessProbe:
+            timeoutSeconds: 3
+            initialDelaySeconds: 3
+            httpGet:
+              path: "/hello"
+              port: 8080
+          livenessProbe:
+            timeoutSeconds: 3
+            initialDelaySeconds: 30
+            httpGet:
+              path: "/hello"
+              port: 8080
+      volumes:
+        - name: db
+          glusterfs:
+            endpoints: glusterfs-endpoints
+            path: heketidbstorage
+        - name: config
+          secret:
+            secretName: heketi-config-secret
+        - name: topology-json
+          configMap:
+            name: heketi-config-topology-json
+{{ end }}
+
+# name 07.heketi-storageclass.yaml
+---
+{{ if .Heketi.Enable }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: "{{.Heketi.Name}}"
+provisioner: kubernetes.io/glusterfs
+reclaimPolicy: Retain
+parameters:
+  resturl: "http://{{.Heketi.VIP}}:8080"
+  restauthenabled: "true"
+  restuser: "admin"
+  restuserkey: "{{.Heketi.AdminKey}}"
+  gidMin: "40000"
+  gidMax: "50000"
+  volumetype: "replicate:2"
+allowVolumeExpansion: true
+{{end}}
+

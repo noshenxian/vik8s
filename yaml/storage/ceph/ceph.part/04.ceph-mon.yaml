@@ -1,0 +1,107 @@
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: ceph-mon
+  namespace: ceph
+  labels:
+    app: ceph
+    daemon: mon
+spec:
+  selector:
+    matchLabels:
+      app: ceph
+      daemon: mon
+  template:
+    metadata:
+      name: ceph-mon
+      labels:
+        app: ceph
+        daemon: mon
+    spec:
+      hostNetwork: true
+      nodeSelector:
+        {{ range $key, $value := .Monitor.NodeSelector }}
+        {{ $key }}: {{ $value }}{{ end }}
+      volumes:
+        - name: ceph-etc
+          secret:
+            secretName: ceph-conf-combined
+        - name: ceph-mon-data
+          hostPath:
+            path: /var/lib/ceph/mon
+        - name: entrypoint
+          configMap:
+            name: ceph-entrypoint
+            defaultMode: 0777
+{{.Repo.PullSecrets | indent 6}}
+      containers:
+        - name: ceph-mon
+          image: {{.Repo}}ceph/ceph:{{.Version}}
+          imagePullPolicy: IfNotPresent
+          command: ["sh","-c","/opt/mon"]
+          securityContext:
+            privileged: true
+          ports:
+            - name: v1
+              containerPort: 6789
+            - name: v2
+              containerPort: 3300
+          env:
+            - name: CEPH_CLUSTER
+              value: ceph
+            - name: CEHP_FSID
+              value: {{ .FSID }}
+            - name: CEHP_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CEHP_NODE_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NETWORK_AUTO_DETECT
+              value: "4"
+          volumeMounts:
+            - name: ceph-etc
+              mountPath: /etc/ceph
+            - name: ceph-mon-data
+              mountPath: /var/lib/ceph/mon
+            - name: entrypoint
+              mountPath: /opt
+          livenessProbe:
+            tcpSocket:
+              port: 6789
+            initialDelaySeconds: 60
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: 6789
+            timeoutSeconds: 5
+          resources:
+            requests:
+              memory: {{ environ "ceph_mon_requests_memory" "50Mi" }}
+              cpu: {{ environ "ceph_mon_requests_cpu" "1000m" }}
+            limits:
+              memory: {{ environ "ceph_mon_limits_memory" "100Mi" }}
+              cpu: {{ environ "ceph_mon_limits_cpu" "2000m" }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ceph-mon
+  namespace: ceph
+  labels:
+    app: ceph
+    daemon: mon
+spec:
+  selector:
+    app: ceph
+    daemon: mon
+  ports:
+    - name: v1
+      port: 6789
+      targetPort: 6789
+    - name: v2
+      port: 3300
+      targetPort: 3300

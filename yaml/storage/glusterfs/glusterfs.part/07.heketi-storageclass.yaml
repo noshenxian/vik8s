@@ -1,0 +1,17 @@
+{{ if .Heketi.Enable }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: "{{.Heketi.Name}}"
+provisioner: kubernetes.io/glusterfs
+reclaimPolicy: Retain
+parameters:
+  resturl: "http://{{.Heketi.VIP}}:8080"
+  restauthenabled: "true"
+  restuser: "admin"
+  restuserkey: "{{.Heketi.AdminKey}}"
+  gidMin: "40000"
+  gidMax: "50000"
+  volumetype: "replicate:2"
+allowVolumeExpansion: true
+{{end}}
